@@ -1,0 +1,17 @@
+name: Daily Tech News
+on:
+  schedule:
+    - cron: '0 1 * * *' # 8h sáng VN
+  workflow_dispatch: # Bấm nút chạy tay được
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Run
+        run: python main.py
