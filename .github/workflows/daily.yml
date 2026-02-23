@@ -1,17 +1,38 @@
 name: Daily Tech News
 on:
   schedule:
-    - cron: '0 1 * * *' # 8h sáng VN
+    # Giờ Việt Nam (UTC+7) → Cron dùng UTC
+    - cron: '0 1 * * *'   # 🌅 08:00 VN — Tin sáng
+    - cron: '0 5 * * *'   # ☀️ 12:00 VN — Tin trưa
+    - cron: '0 11 * * *'  # 🌇 18:00 VN — Tin chiều
+    - cron: '0 15 * * *'  # 🌙 22:00 VN — Tin tối
   workflow_dispatch: # Bấm nút chạy tay được
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+
+      # Khôi phục cache tin đã gửi (chống trùng lặp)
+      - name: Restore sent cache
+        uses: actions/cache@v4
+        with:
+          path: sent_cache.json
+          key: news-cache-${{ github.run_id }}
+          restore-keys: |
+            news-cache-
+
       - name: Install deps
         run: pip install -r requirements.txt
+
       - name: Run
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TOPIC_ID: ${{ secrets.TOPIC_ID }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
         run: python main.py
