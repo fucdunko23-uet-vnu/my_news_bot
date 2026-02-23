@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 # --- Cấu hình qua Environment Variables ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8362778710:AAEeQPGwAtCD5dYIIoi3RrkqNS1gU1n95dI")
 CHAT_ID = os.environ.get("CHAT_ID", "-1003363752562")
-TOPIC_ID = int(os.environ.get("TOPIC_ID", "13423"))
+TOPIC_ID = int(os.environ.get("TOPIC_ID") or "13423")
 ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "KSL53W8ZY3CFF0EB")
 
 # Tickers cổ phiếu muốn theo dõi
