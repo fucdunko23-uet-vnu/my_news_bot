@@ -1,3 +1,8 @@
 requests
 feedparser
 beautifulsoup4
+pyTelegramBotAPI
+google-genai
+schedule
+python-dotenv
+playwright

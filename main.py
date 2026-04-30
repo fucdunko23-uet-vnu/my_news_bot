@@ -1,491 +1,218 @@
-import requests
-import feedparser
-import time
 import os
-import json
-import hashlib
-from datetime import datetime, timezone
-from bs4 import BeautifulSoup
+import time
+import telebot
+import schedule
+import feedparser
+from threading import Thread
+from datetime import datetime
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+from playwright.sync_api import sync_playwright
 
-# --- Cấu hình qua Environment Variables ---
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8362778710:AAEeQPGwAtCD5dYIIoi3RrkqNS1gU1n95dI")
-CHAT_ID = os.environ.get("CHAT_ID", "-1003363752562")
-TOPIC_ID = int(os.environ.get("TOPIC_ID") or "13423")
-ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "KSL53W8ZY3CFF0EB")
+load_dotenv()
 
-# Tickers cổ phiếu muốn theo dõi
-WATCH_TICKERS = os.environ.get("WATCH_TICKERS", "AAPL,MSFT,NVDA,GOOGL,TSLA")
+# --- CONFIG ---
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+GROUP_ID = os.getenv("GROUP_CHAT_ID")
+TOPIC_ID = int(os.getenv("TOPIC_ID") or 0)
 
-# Danh sách nguồn RSS
-SOURCES = {
-    "Wired": "https://www.wired.com/feed/rss",
-    "UploadVR": "https://uploadvr.com/rss/",
-    "The Verge": "https://www.theverge.com/rss/index.xml",
-}
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# File cache để chống trùng lặp tin (persistent qua GitHub Actions cache)
-CACHE_FILE = os.environ.get("CACHE_FILE", "sent_cache.json")
-CACHE_MAX_ENTRIES = 500        # Giữ tối đa 500 entries
-CACHE_EXPIRE_HOURS = 48        # Xoá entries cũ hơn 48h
+MARIA_SYSTEM_PROMPT = """Bạn là Maria Tokuda, trợ lý công nghệ chuyên nghiệp.
+PHONG CÁCH: Chuyên nghiệp, súc tích, tập trung vào giá trị cốt lõi. Xưng hô: 'anh yêu'.
+NHIỆM VỤ:
+1. Viết bài tóm tắt tin tức ngắn gọn, súc tích, làm nổi bật thông tin chính.
+2. Dịch/viết lại bằng tiếng Việt chuẩn, đọc dễ hiểu.
+3. LUÔN kèm theo link gốc của bài viết hoặc nguồn báo ở cuối bài.
+4. Trình bày đẹp mắt bằng Markdown, dùng emoji phù hợp."""
 
-# ═══════════════════════════════════════════
-#  DEDUPLICATION CACHE
-# ═══════════════════════════════════════════
-
-
-def _url_hash(url):
-    """Tạo hash ngắn từ URL để so sánh nhanh"""
-    return hashlib.md5(url.strip().lower().encode()).hexdigest()
+bot = telebot.TeleBot(TOKEN)
 
 
-def load_cache():
-    """Load cache từ file JSON. Trả về dict {hash: timestamp}"""
-    try:
-        if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            # Expire entries cũ
-            now = time.time()
-            expire_secs = CACHE_EXPIRE_HOURS * 3600
-            data = {k: v for k, v in data.items() if now - v < expire_secs}
-            return data
-    except Exception as e:
-        print(f"  ⚠ Không đọc được cache: {e}")
-    return {}
-
-
-def save_cache(cache):
-    """Lưu cache ra file JSON, giới hạn số lượng entries"""
-    try:
-        # Nếu quá nhiều, giữ lại entries mới nhất
-        if len(cache) > CACHE_MAX_ENTRIES:
-            sorted_items = sorted(cache.items(), key=lambda x: x[1], reverse=True)
-            cache = dict(sorted_items[:CACHE_MAX_ENTRIES])
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f)
-        print(f"  💾 Đã lưu cache: {len(cache)} entries")
-    except Exception as e:
-        print(f"  ⚠ Không lưu được cache: {e}")
-
-
-def filter_duplicates(items, cache):
-    """Lọc bỏ các tin đã gửi trước đó. Trả về (new_items, updated_cache)"""
-    new_items = []
-    for item in items:
-        h = _url_hash(item.get("link", ""))
-        if h not in cache:
-            new_items.append(item)
-            cache[h] = time.time()
-    return new_items, cache
-
-
-# ═══════════════════════════════════════════
-#  UTILITIES
-# ═══════════════════════════════════════════
-
-SENTIMENT_EMOJI = {
-    "Bullish": "🟢",
-    "Somewhat-Bullish": "🟡",
-    "Somewhat_Bullish": "🟡",
-    "Neutral": "⚪",
-    "Somewhat-Bearish": "🟠",
-    "Somewhat_Bearish": "🟠",
-    "Bearish": "🔴",
-}
-
-
-def clean_html(html_text, max_len=280):
-    """Làm sạch HTML và cắt ngắn mô tả"""
-    if not html_text:
-        return ""
-    soup = BeautifulSoup(html_text, "html.parser")
-    text = soup.get_text().strip()
-    # Cắt tại câu gần nhất dưới max_len
-    if len(text) > max_len:
-        cut = text[:max_len].rfind(". ")
-        if cut > 100:
-            text = text[: cut + 1]
-        else:
-            text = text[:max_len] + "…"
-    return text
-
-
-def format_time_ago(timestamp_str):
-    """Chuyển epoch timestamp thành dạng 'X giờ trước'"""
-    try:
-        ts = int(timestamp_str)
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-        delta = datetime.now(tz=timezone.utc) - dt
-        hours = int(delta.total_seconds() // 3600)
-        if hours < 1:
-            mins = int(delta.total_seconds() // 60)
-            return f"{mins} phút trước"
-        elif hours < 24:
-            return f"{hours} giờ trước"
-        else:
-            days = hours // 24
-            return f"{days} ngày trước"
-    except Exception:
-        return ""
-
-
-def format_av_time(time_str):
-    """Chuyển '20260223T040356' -> '23/02/2026 04:03'"""
-    try:
-        dt = datetime.strptime(time_str, "%Y%m%dT%H%M%S")
-        return dt.strftime("%d/%m/%Y %H:%M")
-    except Exception:
-        return time_str or ""
-
-
-# ═══════════════════════════════════════════
-#  ALPHA VANTAGE — Tin tức thị trường
-# ═══════════════════════════════════════════
-
-
-def get_alpha_vantage_news(tickers=None, topics=None, limit=5):
-    """Lấy tin tức chứng khoán kèm sentiment từ Alpha Vantage"""
-    items = []
-    try:
-        params = {
-            "function": "NEWS_SENTIMENT",
-            "apikey": ALPHA_VANTAGE_API_KEY,
-            "sort": "LATEST",
-            "limit": limit,
-        }
-        if tickers:
-            params["tickers"] = tickers
-        if topics:
-            params["topics"] = topics
-
-        resp = requests.get(
-            "https://www.alphavantage.co/query", params=params, timeout=15
-        )
-        data = resp.json()
-
-        # Kiểm tra lỗi API (rate limit, key không hợp lệ, ...)
-        if "feed" not in data:
-            print(f"  ⚠ Alpha Vantage: {data.get('Note', data.get('Information', 'No feed data'))}")
-            return items
-
-        for article in data.get("feed", [])[:limit]:
-            # Sentiment badge
-            sentiment_label = article.get("overall_sentiment_label", "Neutral")
-            sentiment_score = article.get("overall_sentiment_score", 0)
-            emoji = SENTIMENT_EMOJI.get(sentiment_label, "⚪")
-
-            # Ticker sentiment highlights
-            ticker_parts = []
-            for ts in article.get("ticker_sentiment", [])[:3]:
-                ticker = ts.get("ticker", "")
-                t_label = ts.get("ticker_sentiment_label", "")
-                t_score = ts.get("ticker_sentiment_score", "0")
-                t_emoji = SENTIMENT_EMOJI.get(t_label, "⚪")
-                try:
-                    score_val = float(t_score)
-                    sign = "+" if score_val >= 0 else ""
-                    ticker_parts.append(f"{t_emoji}{ticker} ({sign}{score_val:.2f})")
-                except ValueError:
-                    ticker_parts.append(f"{t_emoji}{ticker}")
-
-            ticker_line = " | ".join(ticker_parts) if ticker_parts else ""
-
-            # Topic tags
-            topic_tags = " ".join(
-                [f"#{t['topic']}" for t in article.get("topics", [])[:3]]
+def call_gemini(prompt: str) -> str:
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    system_instruction=MARIA_SYSTEM_PROMPT,
+                ),
             )
-
-            # Build description
-            summary = clean_html(article.get("summary", ""), max_len=250)
-            pub_time = format_av_time(article.get("time_published", ""))
-            source = article.get("source", "Unknown")
-
-            desc_lines = []
-            if ticker_line:
-                desc_lines.append(ticker_line)
-            desc_lines.append(f"\n📝 {summary}")
-            desc_lines.append(f"📰 {source} • {pub_time}")
-            if topic_tags:
-                desc_lines.append(f"🏷️ {topic_tags}")
-
-            items.append(
-                {
-                    "section": "market",
-                    "source": source,
-                    "title": article.get("title", ""),
-                    "link": article.get("url", ""),
-                    "sentiment_emoji": emoji,
-                    "sentiment_label": sentiment_label,
-                    "desc": "\n".join(desc_lines),
-                }
-            )
-    except Exception as e:
-        print(f"  ❌ Alpha Vantage error: {e}")
-    return items
+            return response.text
+        except Exception as e:
+            if "429" in str(e) and attempt < 2:
+                print(f"⚠️ Rate limit, chờ 60s... (lần {attempt + 1})")
+                time.sleep(60)
+            else:
+                raise e
 
 
-# ═══════════════════════════════════════════
-#  HACKER NEWS — Top stories + comments
-# ═══════════════════════════════════════════
-
-
-def get_hacker_news(limit=5):
-    """Lấy top stories từ HN kèm author, score, và top comment preview"""
-    items = []
+def get_github_trending():
+    print("Đang cào GitHub Trending bằng Playwright...")
     try:
-        top_ids = requests.get(
-            "https://hacker-news.firebaseio.com/v0/topstories.json", timeout=10
-        ).json()[:limit]
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto("https://github.com/trending", timeout=60000)
+            page.wait_for_selector("article.Box-row", timeout=10000)
 
-        for item_id in top_ids:
-            story = requests.get(
-                f"https://hacker-news.firebaseio.com/v0/item/{item_id}.json",
-                timeout=10,
-            ).json()
+            repo = page.query_selector("article.Box-row")
+            if repo:
+                title_elem = repo.query_selector("h2 a")
+                desc_elem = repo.query_selector("p")
 
-            if not story:
-                continue
+                title = title_elem.inner_text().strip().replace(" ", "").replace("\n", "") if title_elem else "Unknown"
+                link = "https://github.com" + title_elem.get_attribute("href") if title_elem else ""
+                desc = desc_elem.inner_text().strip() if desc_elem else "No description"
 
-            author = story.get("by", "unknown")
-            score = story.get("score", 0)
-            num_comments = story.get("descendants", 0)
-            time_ago = format_time_ago(story.get("time", 0))
-            hn_link = f"https://news.ycombinator.com/item?id={item_id}"
-            link = story.get("url", hn_link)
-
-            # Fetch top comment preview
-            top_comment_text = ""
-            kids = story.get("kids", [])
-            if kids:
-                try:
-                    comment = requests.get(
-                        f"https://hacker-news.firebaseio.com/v0/item/{kids[0]}.json",
-                        timeout=5,
-                    ).json()
-                    if comment and comment.get("text"):
-                        raw = clean_html(comment["text"], max_len=120)
-                        if raw:
-                            top_comment_text = raw
-                except Exception:
-                    pass
-
-            # Build description
-            desc_lines = [
-                f"⬆️ {score} pts  •  💬 {num_comments} replies  •  👤 {author}  •  🕐 {time_ago}"
-            ]
-            if top_comment_text:
-                desc_lines.append(f'\n💬 Top: "{top_comment_text}"')
-            if link != hn_link:
-                desc_lines.append(f"🗣️ Thảo luận: {hn_link}")
-
-            items.append(
-                {
-                    "section": "hackernews",
-                    "source": "Hacker News",
-                    "title": story.get("title", ""),
-                    "link": link,
-                    "desc": "\n".join(desc_lines),
-                }
-            )
+                browser.close()
+                return {"title": title, "link": link, "desc": desc}
+            browser.close()
     except Exception as e:
-        print(f"  ❌ Hacker News error: {e}")
-    return items
+        print(f"Playwright error: {e}")
+    return None
 
 
-# ═══════════════════════════════════════════
-#  RSS FEEDS — Wired, The Verge, etc.
-# ═══════════════════════════════════════════
-
-
-def get_rss_news(source_name, url, limit=3):
-    """Lấy tin từ RSS feeds kèm ngày, tác giả, tags"""
-    items = []
-    try:
-        feed = feedparser.parse(url)
-        for entry in feed.entries[:limit]:
-            # Lấy description và làm sạch
-            summary = clean_html(
-                entry.get("summary", entry.get("description", "")), max_len=250
-            )
-
-            # Ngày đăng
-            pub_date = ""
-            if hasattr(entry, "published_parsed") and entry.published_parsed:
-                try:
-                    dt = datetime(*entry.published_parsed[:6])
-                    pub_date = dt.strftime("%d/%m/%Y")
-                except Exception:
-                    pub_date = entry.get("published", "")[:16]
-            elif entry.get("published"):
-                pub_date = entry["published"][:20]
-
-            # Tác giả
-            author = entry.get("author", entry.get("dc_creator", ""))
-
-            # Tags / categories
-            tags = []
-            if hasattr(entry, "tags"):
-                tags = [t.get("term", "") for t in entry.tags[:4] if t.get("term")]
-
-            # Build description
-            desc_lines = []
-            meta_parts = []
-            if pub_date:
-                meta_parts.append(f"📅 {pub_date}")
-            if author:
-                meta_parts.append(f"✍️ {author}")
-            if meta_parts:
-                desc_lines.append(" • ".join(meta_parts))
-
-            desc_lines.append(f"\n📝 {summary}")
-
-            if tags:
-                desc_lines.append("🏷️ " + " ".join([f"#{t}" for t in tags]))
-
-            items.append(
-                {
-                    "section": "tech",
+def get_rss_news():
+    sources = {
+        "Hacker News": "https://news.ycombinator.com/rss",
+        "TechCrunch": "https://techcrunch.com/feed/",
+        "Reddit r/technology": "https://www.reddit.com/r/technology/top/.rss?t=day"
+    }
+    news_items = []
+    for source_name, url in sources.items():
+        try:
+            feed = feedparser.parse(url)
+            if feed.entries:
+                # Lấy 1 tin hot nhất của mỗi nguồn
+                top_entry = feed.entries[0]
+                news_items.append({
                     "source": source_name,
-                    "title": entry.title,
-                    "link": entry.link,
-                    "desc": "\n".join(desc_lines),
-                }
-            )
+                    "title": top_entry.title,
+                    "link": top_entry.link
+                })
+        except Exception as e:
+            print(f"Error parsing {source_name}: {e}")
+    return news_items
+
+
+def broadcast_news():
+    print(f"[{datetime.now()}] 📡 Maria đang tổng hợp bản tin...")
+    try:
+        bot.send_message(
+            GROUP_ID,
+            f"🌆 *BẢN TIN CÔNG NGHỆ TỔNG HỢP* — {datetime.now().strftime('%d/%m/%Y')}\n_Đang thu thập và phân tích dữ liệu, anh yêu đợi em chút nhé..._",
+            message_thread_id=TOPIC_ID,
+            parse_mode="Markdown"
+        )
     except Exception as e:
-        print(f"  ❌ RSS {source_name} error: {e}")
-    return items
+        print(f"Lỗi gửi tin nhắn mở đầu: {e}")
+        return
+
+    # 1. GitHub Trending
+    gh_repo = get_github_trending()
+    if gh_repo:
+        prompt = f"Viết 1 bài giới thiệu ngắn gọn về repo GitHub đang trending này (sử dụng format Markdown):\nTên: {gh_repo['title']}\nMô tả: {gh_repo['desc']}\n(KHÔNG chèn link vào bài viết, chỉ viết nội dung)"
+        text = call_gemini(prompt)
+        final_msg = f"🐙 *Nguồn: GitHub Trending*\n\n{text}\n\n🔗 [Xem Repository tại đây]({gh_repo['link']})"
+        try:
+            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID, parse_mode="Markdown")
+        except Exception:
+            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID)
+        time.sleep(3)
+
+    # 2. RSS News
+    rss_news = get_rss_news()
+    for item in rss_news:
+        prompt = f"Tóm tắt tin tức sau từ {item['source']}:\nTiêu đề: {item['title']}\nLink: {item['link']}\n(Lưu ý: tự động tìm kiếm thêm nội dung để tóm tắt chi tiết. KHÔNG chèn link vào bài viết, tôi sẽ tự chèn)"
+        text = call_gemini(prompt)
+        final_msg = f"📰 *Nguồn: {item['source']}*\n\n{text}\n\n🔗 [Đọc bài viết gốc tại đây]({item['link']})"
+        try:
+            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID, parse_mode="Markdown")
+        except Exception:
+            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID)
+        time.sleep(3)
+
+    print(f"[{datetime.now()}] ✅ Đã gửi toàn bộ bản tin thành công!")
 
 
-# ═══════════════════════════════════════════
-#  TELEGRAM — Gửi tin nhắn đẹp
-# ═══════════════════════════════════════════
+@bot.message_handler(commands=['news'])
+def handle_news_command(message):
+    try:
+        topic = message.text.replace("/news", "").strip()
+        if not topic:
+            topic = "Công nghệ, AI, Crypto"
 
-
-def send_section_header(header_text):
-    """Gửi header phân cách section"""
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "message_thread_id": TOPIC_ID,
-        "text": header_text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    requests.post(url, json=payload)
-
-
-def send_news_item(item):
-    """Gửi 1 tin nhắn đã format đẹp"""
-    section = item.get("section", "tech")
-
-    if section == "market":
-        emoji = item.get("sentiment_emoji", "⚪")
-        sentiment = item.get("sentiment_label", "")
-        text = (
-            f"{emoji} <b>{sentiment}</b>\n"
-            f"🚀 <b>{item['title']}</b>\n\n"
-            f"{item['desc']}\n\n"
-            f"🔗 <a href='{item['link']}'>Đọc chi tiết</a>"
-        )
-    elif section == "hackernews":
-        text = (
-            f"🚀 <b>{item['title']}</b>\n\n"
-            f"{item['desc']}\n\n"
-            f"🔗 <a href='{item['link']}'>Đọc chi tiết</a>"
-        )
-    else:
-        text = (
-            f"<b>[{item['source']}]</b>\n"
-            f"🚀 <b>{item['title']}</b>\n\n"
-            f"{item['desc']}\n\n"
-            f"🔗 <a href='{item['link']}'>Đọc chi tiết</a>"
+        bot.send_message(
+            message.chat.id,
+            f"🔍 Đang tìm kiếm 2 tin tức hot nhất về chủ đề: *{topic}*...",
+            message_thread_id=message.message_thread_id,
+            parse_mode="Markdown"
         )
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "message_thread_id": TOPIC_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    }
-    resp = requests.post(url, json=payload)
-    if not resp.ok:
-        print(f"  ⚠ Telegram error: {resp.status_code} — {resp.text[:200]}")
+        import urllib.parse
+        encoded_topic = urllib.parse.quote(topic)
+        rss_url = f"https://news.google.com/rss/search?q={encoded_topic}&hl=vi&gl=VN&ceid=VN:vi"
+        feed = feedparser.parse(rss_url)
+
+        if not feed.entries:
+            bot.send_message(message.chat.id, f"❌ Xin lỗi anh yêu, em không tìm thấy tin tức nào về chủ đề '{topic}'.", message_thread_id=message.message_thread_id)
+            return
+
+        for entry in feed.entries[:2]:
+            prompt = f"Tóm tắt ngắn gọn tin tức này bằng tiếng Việt:\nTiêu đề: {entry.title}\nLink: {entry.link}\n(KHÔNG chèn thêm link vào bài viết, không dùng lời chào hỏi thừa thãi)"
+            text = call_gemini(prompt)
+            final_msg = f"📰 *Chủ đề: {topic}*\n\n{text}\n\n🔗 [Đọc bài viết gốc tại đây]({entry.link})"
+            try:
+                bot.send_message(message.chat.id, final_msg, message_thread_id=message.message_thread_id, parse_mode="Markdown")
+            except Exception:
+                bot.send_message(message.chat.id, final_msg, message_thread_id=message.message_thread_id)
+            time.sleep(2)
+    except Exception as e:
+        print(f"❌ Lỗi lệnh /news: {e}")
 
 
-# ═══════════════════════════════════════════
-#  MAIN
-# ═══════════════════════════════════════════
+@bot.message_handler(func=lambda message: True)
+def handle_chat(message):
+    if not message.text.startswith('/'):
+        if str(message.chat.id) == str(GROUP_ID):
+            try:
+                bot.send_chat_action(GROUP_ID, "typing", message_thread_id=TOPIC_ID)
+                prompt = f"Anh yêu hỏi: {message.text}\nTìm thông tin và trả lời chi tiết, súc tích."
+                full_text = call_gemini(prompt)
+                try:
+                    bot.send_message(GROUP_ID, full_text, message_thread_id=TOPIC_ID, parse_mode="Markdown")
+                except Exception:
+                    bot.send_message(GROUP_ID, full_text, message_thread_id=TOPIC_ID)
+            except Exception as e:
+                print(f"❌ Lỗi chat: {e}")
+
+
+def run_scheduler():
+    schedule.every().day.at("19:00").do(broadcast_news)
+    print("⏰ Scheduler đã khởi động — bản tin tự động lúc 19:00 hàng ngày")
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
+
 
 if __name__ == "__main__":
-    print("🤖 News Bot đang chạy...")
-    print(f"   Thời gian: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n")
+    print("🤖 Maria Tokuda v6.0 (Separate Messages & Playwright Edition) đã sẵn sàng!")
+    Thread(target=run_scheduler, daemon=True).start()
 
-    # Load cache chống trùng lặp
-    cache = load_cache()
-    cached_count = len(cache)
-    print(f"📦 Cache: {cached_count} tin đã gửi trước đó\n")
-
-    total_fetched = 0
-    total_sent = 0
-
-    # ── Section 1: Thị trường & Cổ phiếu ──
-    print("📊 Đang lấy tin thị trường từ Alpha Vantage...")
-    market_news = get_alpha_vantage_news(tickers=WATCH_TICKERS, topics="technology,financial_markets", limit=5)
-    total_fetched += len(market_news)
-    market_news, cache = filter_duplicates(market_news, cache)
-
-    if market_news:
-        send_section_header("📊 ═══ <b>THỊ TRƯỜNG &amp; CỔ PHIẾU</b> ═══")
-        time.sleep(1)
-        for news in market_news:
-            send_news_item(news)
-            time.sleep(2)
-        total_sent += len(market_news)
-        print(f"  ✅ Đã gửi {len(market_news)} tin thị trường (mới)")
-    else:
-        print("  ⏭️ Không có tin thị trường mới")
-
-    # ── Section 2: Hacker News ──
-    print("\n🔥 Đang lấy tin từ Hacker News...")
-    hn_news = get_hacker_news(20)
-    total_fetched += len(hn_news)
-    hn_news, cache = filter_duplicates(hn_news, cache)
-
-    if hn_news:
-        send_section_header("🔥 ═══ <b>HACKER NEWS TOP</b> ═══")
-        time.sleep(1)
-        for news in hn_news:
-            send_news_item(news)
-            time.sleep(2)
-        total_sent += len(hn_news)
-        print(f"  ✅ Đã gửi {len(hn_news)} tin Hacker News (mới)")
-    else:
-        print("  ⏭️ Không có tin HN mới")
-
-    # ── Section 3: Tech News từ RSS ──
-    print("\n🌐 Đang lấy tin từ RSS feeds...")
-    tech_news = []
-    for name, url in SOURCES.items():
-        print(f"  📡 {name}...")
-        tech_news.extend(get_rss_news(name, url, 3))
-    total_fetched += len(tech_news)
-    tech_news, cache = filter_duplicates(tech_news, cache)
-
-    if tech_news:
-        send_section_header("🌐 ═══ <b>TECH NEWS</b> ═══")
-        time.sleep(1)
-        for news in tech_news:
-            send_news_item(news)
-            time.sleep(2)
-        total_sent += len(tech_news)
-        print(f"  ✅ Đã gửi {len(tech_news)} tin tech (mới)")
-    else:
-        print("  ⏭️ Không có tin tech mới")
-
-    # Lưu cache
-    save_cache(cache)
-
-    skipped = total_fetched - total_sent
-    print(f"\n🎉 Hoàn tất! Fetched: {total_fetched} | Gửi mới: {total_sent} | Bỏ qua (trùng): {skipped}")
+    while True:
+        try:
+            print("🔄 Đang kết nối Telegram...")
+            bot.polling(
+                none_stop=True,
+                interval=3,
+                timeout=60,
+                long_polling_timeout=60,
+            )
+        except Exception as e:
+            print(f"⚠️ Polling lỗi: {e}")
+            print("⏳ Thử lại sau 15 giây...")
+            time.sleep(15)
