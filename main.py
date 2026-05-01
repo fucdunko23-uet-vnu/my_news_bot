@@ -100,6 +100,10 @@ def get_github_trending():
 
 
 def get_rss_news():
+    import requests
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     sources = {
         "Hacker News": "https://news.ycombinator.com/rss",
         "TechCrunch": "https://techcrunch.com/feed/",
@@ -108,7 +112,9 @@ def get_rss_news():
     news_items = []
     for source_name, url in sources.items():
         try:
-            feed = feedparser.parse(url)
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            feed = feedparser.parse(resp.content)
             if feed.entries:
                 # Lấy 1 tin hot nhất của mỗi nguồn
                 top_entry = feed.entries[0]
@@ -177,9 +183,17 @@ def handle_news_command(message):
         )
 
         import urllib.parse
+        import requests
         encoded_topic = urllib.parse.quote(topic)
         rss_url = f"https://news.google.com/rss/search?q={encoded_topic}&hl=vi&gl=VN&ceid=VN:vi"
-        feed = feedparser.parse(rss_url)
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        resp = requests.get(rss_url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        
+        feed = feedparser.parse(resp.content)
 
         if not feed.entries:
             bot.send_message(message.chat.id, f"❌ Xin lỗi anh yêu, em không tìm thấy tin tức nào về chủ đề '{topic}'.", message_thread_id=message.message_thread_id)
@@ -196,6 +210,15 @@ def handle_news_command(message):
             time.sleep(2)
     except Exception as e:
         print(f"❌ Lỗi lệnh /news: {e}")
+        try:
+            bot.send_message(
+                message.chat.id,
+                f"❌ Maria gặp lỗi rồi anh ơi: `{e}`",
+                message_thread_id=message.message_thread_id,
+                parse_mode="Markdown"
+            )
+        except:
+            bot.send_message(message.chat.id, f"❌ Lỗi: {e}", message_thread_id=message.message_thread_id)
 
 
 
