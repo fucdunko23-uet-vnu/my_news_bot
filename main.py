@@ -17,7 +17,16 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROUP_ID = os.getenv("GROUP_CHAT_ID")
 TOPIC_ID = int(os.getenv("TOPIC_ID") or 0)
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Hỗ trợ nhiều API Key cách nhau bằng dấu phẩy
+API_KEYS = [k.strip() for k in (os.getenv("GEMINI_API_KEY") or "").split(",") if k.strip()]
+if not API_KEYS:
+    print("⚠️ WARNING: Chưa cấu hình GEMINI_API_KEY")
+    client = None
+else:
+    current_key_idx = 0
+    client = genai.Client(api_key=API_KEYS[current_key_idx])
+
+bot_username = None
 
 MARIA_SYSTEM_PROMPT = """Bạn là Maria Tokuda, trợ lý công nghệ chuyên nghiệp.
 PHONG CÁCH: Chuyên nghiệp, súc tích, tập trung vào giá trị cốt lõi. Xưng hô: 'anh yêu'.
@@ -31,7 +40,14 @@ bot = telebot.TeleBot(TOKEN)
 
 
 def call_gemini(prompt: str) -> str:
-    for attempt in range(3):
+    global current_key_idx, client
+    if not API_KEYS:
+        return "⚠️ Em không có API Key để suy nghĩ (GEMINI_API_KEY trống)."
+        
+    attempts_per_key = 2
+    total_attempts = len(API_KEYS) * attempts_per_key
+    
+    for attempt in range(total_attempts):
         try:
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
@@ -43,9 +59,16 @@ def call_gemini(prompt: str) -> str:
             )
             return response.text
         except Exception as e:
-            if "429" in str(e) and attempt < 2:
-                print(f"⚠️ Rate limit, chờ 60s... (lần {attempt + 1})")
-                time.sleep(60)
+            if "429" in str(e) or "quota" in str(e).lower():
+                print(f"⚠️ Rate limit ở Key thứ {current_key_idx + 1}... (Lỗi: {e})")
+                if len(API_KEYS) > 1 and attempt % attempts_per_key == attempts_per_key - 1:
+                    current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+                    client = genai.Client(api_key=API_KEYS[current_key_idx])
+                    print(f"🔄 Đã chuyển sang API key thứ {current_key_idx + 1}")
+                elif attempt < total_attempts - 1:
+                    time.sleep(5)
+                else:
+                    raise Exception("Đã thử tất cả các API Key nhưng vẫn bị giới hạn Rate limit (429).")
             else:
                 raise e
 
@@ -175,20 +198,6 @@ def handle_news_command(message):
         print(f"❌ Lỗi lệnh /news: {e}")
 
 
-@bot.message_handler(func=lambda message: True)
-def handle_chat(message):
-    if not message.text.startswith('/'):
-        if str(message.chat.id) == str(GROUP_ID):
-            try:
-                bot.send_chat_action(GROUP_ID, "typing", message_thread_id=TOPIC_ID)
-                prompt = f"Anh yêu hỏi: {message.text}\nTìm thông tin và trả lời chi tiết, súc tích."
-                full_text = call_gemini(prompt)
-                try:
-                    bot.send_message(GROUP_ID, full_text, message_thread_id=TOPIC_ID, parse_mode="Markdown")
-                except Exception:
-                    bot.send_message(GROUP_ID, full_text, message_thread_id=TOPIC_ID)
-            except Exception as e:
-                print(f"❌ Lỗi chat: {e}")
 
 
 def run_scheduler():
@@ -201,6 +210,13 @@ def run_scheduler():
 
 if __name__ == "__main__":
     print("🤖 Maria Tokuda v6.0 (Separate Messages & Playwright Edition) đã sẵn sàng!")
+    
+    if os.getenv("RUN_ONCE") == "true":
+        print("🚀 Chế độ RUN_ONCE: Cập nhật tin tức một lần rồi thoát (dành cho Github Actions)")
+        broadcast_news()
+        import sys
+        sys.exit(0)
+        
     Thread(target=run_scheduler, daemon=True).start()
 
     while True:

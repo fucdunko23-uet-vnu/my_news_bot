@@ -29,10 +29,14 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      - name: Install Playwright Browsers
+        run: playwright install chromium
+
       - name: Run
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          GROUP_CHAT_ID: ${{ secrets.GROUP_CHAT_ID }}
           TOPIC_ID: ${{ secrets.TOPIC_ID }}
-          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          RUN_ONCE: "true"
         run: python main.py
