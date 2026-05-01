@@ -34,8 +34,8 @@ jobs:
 
       - name: Run
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          GROUP_CHAT_ID: ${{ secrets.GROUP_CHAT_ID }}
+          TELEGRAM_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GROUP_CHAT_ID: ${{ secrets.CHAT_ID }}
           TOPIC_ID: ${{ secrets.TOPIC_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           RUN_ONCE: "true"
