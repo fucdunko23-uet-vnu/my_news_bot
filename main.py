@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import telebot
 import schedule
@@ -73,6 +74,31 @@ def call_gemini(prompt: str) -> str:
                 raise e
 
 
+def get_sent_github_repos():
+    filepath = os.path.join("data", "sent_github_repos.json")
+    if not os.path.exists(filepath):
+        return []
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_sent_github_repo(repo_link):
+    filepath = os.path.join("data", "sent_github_repos.json")
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    repos = get_sent_github_repos()
+    if repo_link not in repos:
+        repos.append(repo_link)
+    # Giữ lại tối đa 30 repo gần nhất
+    if len(repos) > 30:
+        repos = repos[-30:]
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(repos, f, indent=2)
+    except Exception as e:
+        print(f"Lỗi khi lưu trạng thái GitHub: {e}")
+
 def get_github_trending():
     print("Đang cào GitHub Trending bằng Playwright...")
     try:
@@ -82,8 +108,11 @@ def get_github_trending():
             page.goto("https://github.com/trending", timeout=60000)
             page.wait_for_selector("article.Box-row", timeout=10000)
 
-            repo = page.query_selector("article.Box-row")
-            if repo:
+            repos = page.query_selector_all("article.Box-row")
+            sent_repos = get_sent_github_repos()
+            selected_repo = None
+
+            for repo in repos:
                 title_elem = repo.query_selector("h2 a")
                 desc_elem = repo.query_selector("p")
 
@@ -91,9 +120,24 @@ def get_github_trending():
                 link = "https://github.com" + title_elem.get_attribute("href") if title_elem else ""
                 desc = desc_elem.inner_text().strip() if desc_elem else "No description"
 
-                browser.close()
-                return {"title": title, "link": link, "desc": desc}
+                if link and link not in sent_repos:
+                    selected_repo = {"title": title, "link": link, "desc": desc}
+                    save_sent_github_repo(link)
+                    break
+
+            # Nếu tất cả các repo top đều đã gửi, lấy tạm repo đầu tiên
+            if not selected_repo and repos:
+                repo = repos[0]
+                title_elem = repo.query_selector("h2 a")
+                desc_elem = repo.query_selector("p")
+
+                title = title_elem.inner_text().strip().replace(" ", "").replace("\n", "") if title_elem else "Unknown"
+                link = "https://github.com" + title_elem.get_attribute("href") if title_elem else ""
+                desc = desc_elem.inner_text().strip() if desc_elem else "No description"
+                selected_repo = {"title": title, "link": link, "desc": desc}
+
             browser.close()
+            return selected_repo
     except Exception as e:
         print(f"Playwright error: {e}")
     return None
@@ -128,6 +172,43 @@ def get_rss_news():
     return news_items
 
 
+def get_daily_leetcode():
+    import requests
+    print("Đang lấy thông tin LeetCode Daily Challenge...")
+    url = "https://leetcode.com/graphql"
+    payload = {
+        "query": """
+        query questionOfToday {
+          activeDailyCodingChallengeQuestion {
+            link
+            question {
+              difficulty
+              title
+            }
+          }
+        }
+        """
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        challenge = data.get("data", {}).get("activeDailyCodingChallengeQuestion")
+        if challenge:
+            question = challenge.get("question", {})
+            return {
+                "title": question.get("title", "Unknown"),
+                "difficulty": question.get("difficulty", "Unknown"),
+                "link": "https://leetcode.com" + challenge.get("link", "")
+            }
+    except Exception as e:
+        print(f"Error fetching LeetCode: {e}")
+    return None
+
 def broadcast_news():
     print(f"[{datetime.now()}] 📡 Maria đang tổng hợp bản tin...")
     try:
@@ -159,6 +240,18 @@ def broadcast_news():
         prompt = f"Tóm tắt tin tức sau từ {item['source']}:\nTiêu đề: {item['title']}\nLink: {item['link']}\n(Lưu ý: tự động tìm kiếm thêm nội dung để tóm tắt chi tiết. KHÔNG chèn link vào bài viết, tôi sẽ tự chèn)"
         text = call_gemini(prompt)
         final_msg = f"📰 *Nguồn: {item['source']}*\n\n{text}\n\n🔗 [Đọc bài viết gốc tại đây]({item['link']})"
+        try:
+            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID, parse_mode="Markdown")
+        except Exception:
+            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID)
+        time.sleep(3)
+
+    # 3. LeetCode Daily Challenge
+    leetcode_data = get_daily_leetcode()
+    if leetcode_data:
+        prompt = f"Viết 1 đoạn ngắn (2-3 câu) động viên mọi người giải bài LeetCode hàng ngày sau:\nBài: {leetcode_data['title']}\nĐộ khó: {leetcode_data['difficulty']}\n(Giọng điệu dễ thương, xưng hô 'anh yêu', dùng emoji, KHÔNG chèn link)"
+        text = call_gemini(prompt)
+        final_msg = f"💻 *Góc Luyện Tập LeetCode*\n\n{text}\n\n📌 *Bài toán:* {leetcode_data['title']}\n🔥 *Độ khó:* {leetcode_data['difficulty']}\n🔗 [Tham gia giải bài ngay]({leetcode_data['link']})"
         try:
             bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID, parse_mode="Markdown")
         except Exception:
