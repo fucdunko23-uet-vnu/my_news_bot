@@ -30,12 +30,12 @@ else:
 bot_username = None
 
 MARIA_SYSTEM_PROMPT = """Bạn là Maria Tokuda, trợ lý công nghệ chuyên nghiệp.
-PHONG CÁCH: Chuyên nghiệp, súc tích, tập trung vào giá trị cốt lõi. Xưng hô: 'anh yêu'.
+PHONG CÁCH: Hấp dẫn, kích thích sự tò mò. Xưng hô: 'anh yêu'.
 NHIỆM VỤ:
-1. Viết bài tóm tắt tin tức ngắn gọn, súc tích, làm nổi bật thông tin chính.
-2. Dịch/viết lại bằng tiếng Việt chuẩn, đọc dễ hiểu.
-3. LUÔN kèm theo link gốc của bài viết hoặc nguồn báo ở cuối bài.
-4. Trình bày đẹp mắt bằng Markdown, dùng emoji phù hợp."""
+1. CHỈ VIẾT ĐÚNG 1 CÂU TIÊU ĐỀ thật giật tít, hấp dẫn để kích thích người đọc click vào xem chi tiết. KHÔNG tóm tắt nội dung dài dòng.
+2. Dịch/viết bằng tiếng Việt chuẩn, đọc tự nhiên.
+3. TUYỆT ĐỐI KHÔNG dùng bất kỳ định dạng Markdown nào (không dùng dấu *, _, #, v.v.). Chỉ dùng văn bản thuần túy.
+4. Có thể dùng 1-2 emoji phù hợp."""
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -214,9 +214,8 @@ def broadcast_news():
     try:
         bot.send_message(
             GROUP_ID,
-            f"🌆 *BẢN TIN CÔNG NGHỆ TỔNG HỢP* — {datetime.now().strftime('%d/%m/%Y')}\n_Đang thu thập và phân tích dữ liệu, anh yêu đợi em chút nhé..._",
-            message_thread_id=TOPIC_ID,
-            parse_mode="Markdown"
+            f"🌆 BẢN TIN CÔNG NGHỆ TỔNG HỢP — {datetime.now().strftime('%d/%m/%Y')}\nĐang thu thập và phân tích dữ liệu, anh yêu đợi em chút nhé...",
+            message_thread_id=TOPIC_ID
         )
     except Exception as e:
         print(f"Lỗi gửi tin nhắn mở đầu: {e}")
@@ -225,37 +224,28 @@ def broadcast_news():
     # 1. GitHub Trending
     gh_repo = get_github_trending()
     if gh_repo:
-        prompt = f"Viết 1 bài giới thiệu ngắn gọn về repo GitHub đang trending này (sử dụng format Markdown):\nTên: {gh_repo['title']}\nMô tả: {gh_repo['desc']}\n(KHÔNG chèn link vào bài viết, chỉ viết nội dung)"
+        prompt = f"Viết 1 câu tiêu đề thật giật tít và hấp dẫn bằng tiếng Việt để giới thiệu repo GitHub đang trending này:\nTên: {gh_repo['title']}\nMô tả: {gh_repo['desc']}"
         text = call_gemini(prompt)
-        final_msg = f"🐙 *Nguồn: GitHub Trending*\n\n{text}\n\n🔗 [Xem Repository tại đây]({gh_repo['link']})"
-        try:
-            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID, parse_mode="Markdown")
-        except Exception:
-            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID)
+        final_msg = f"🐙 Nguồn: GitHub Trending\n\n{text}\n\n🔗 Link: {gh_repo['link']}"
+        bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID)
         time.sleep(3)
 
     # 2. RSS News
     rss_news = get_rss_news()
     for item in rss_news:
-        prompt = f"Tóm tắt tin tức sau từ {item['source']}:\nTiêu đề: {item['title']}\nLink: {item['link']}\n(Lưu ý: tự động tìm kiếm thêm nội dung để tóm tắt chi tiết. KHÔNG chèn link vào bài viết, tôi sẽ tự chèn)"
+        prompt = f"Dựa vào tiêu đề sau, hãy viết 1 câu tiêu đề tiếng Việt thật giật tít, hấp dẫn và kích thích sự tò mò:\nTiêu đề gốc: {item['title']}\nNguồn: {item['source']}"
         text = call_gemini(prompt)
-        final_msg = f"📰 *Nguồn: {item['source']}*\n\n{text}\n\n🔗 [Đọc bài viết gốc tại đây]({item['link']})"
-        try:
-            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID, parse_mode="Markdown")
-        except Exception:
-            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID)
+        final_msg = f"📰 Nguồn: {item['source']}\n\n{text}\n\n🔗 Link: {item['link']}"
+        bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID)
         time.sleep(3)
 
     # 3. LeetCode Daily Challenge
     leetcode_data = get_daily_leetcode()
     if leetcode_data:
-        prompt = f"Viết 1 đoạn ngắn (2-3 câu) động viên mọi người giải bài LeetCode hàng ngày sau:\nBài: {leetcode_data['title']}\nĐộ khó: {leetcode_data['difficulty']}\n(Giọng điệu dễ thương, xưng hô 'anh yêu', dùng emoji, KHÔNG chèn link)"
+        prompt = f"Viết 1 câu thật giật tít, khơi gợi sự tò mò để thách thức mọi người giải bài LeetCode này:\nBài: {leetcode_data['title']}\nĐộ khó: {leetcode_data['difficulty']}"
         text = call_gemini(prompt)
-        final_msg = f"💻 *Góc Luyện Tập LeetCode*\n\n{text}\n\n📌 *Bài toán:* {leetcode_data['title']}\n🔥 *Độ khó:* {leetcode_data['difficulty']}\n🔗 [Tham gia giải bài ngay]({leetcode_data['link']})"
-        try:
-            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID, parse_mode="Markdown")
-        except Exception:
-            bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID)
+        final_msg = f"💻 Góc Luyện Tập LeetCode\n\n{text}\n\n📌 Bài toán: {leetcode_data['title']}\n🔥 Độ khó: {leetcode_data['difficulty']}\n🔗 Link: {leetcode_data['link']}"
+        bot.send_message(GROUP_ID, final_msg, message_thread_id=TOPIC_ID)
         time.sleep(3)
 
     print(f"[{datetime.now()}] ✅ Đã gửi toàn bộ bản tin thành công!")
@@ -270,9 +260,8 @@ def handle_news_command(message):
 
         bot.send_message(
             message.chat.id,
-            f"🔍 Đang tìm kiếm 2 tin tức hot nhất về chủ đề: *{topic}*...",
-            message_thread_id=message.message_thread_id,
-            parse_mode="Markdown"
+            f"🔍 Đang tìm kiếm 2 tin tức hot nhất về chủ đề: {topic}...",
+            message_thread_id=message.message_thread_id
         )
 
         import urllib.parse
@@ -293,25 +282,14 @@ def handle_news_command(message):
             return
 
         for entry in feed.entries[:2]:
-            prompt = f"Tóm tắt ngắn gọn tin tức này bằng tiếng Việt:\nTiêu đề: {entry.title}\nLink: {entry.link}\n(KHÔNG chèn thêm link vào bài viết, không dùng lời chào hỏi thừa thãi)"
+            prompt = f"Dựa vào tiêu đề sau, hãy viết 1 câu tiêu đề tiếng Việt thật giật tít, hấp dẫn:\nTiêu đề gốc: {entry.title}"
             text = call_gemini(prompt)
-            final_msg = f"📰 *Chủ đề: {topic}*\n\n{text}\n\n🔗 [Đọc bài viết gốc tại đây]({entry.link})"
-            try:
-                bot.send_message(message.chat.id, final_msg, message_thread_id=message.message_thread_id, parse_mode="Markdown")
-            except Exception:
-                bot.send_message(message.chat.id, final_msg, message_thread_id=message.message_thread_id)
+            final_msg = f"📰 Chủ đề: {topic}\n\n{text}\n\n🔗 Link: {entry.link}"
+            bot.send_message(message.chat.id, final_msg, message_thread_id=message.message_thread_id)
             time.sleep(2)
     except Exception as e:
         print(f"❌ Lỗi lệnh /news: {e}")
-        try:
-            bot.send_message(
-                message.chat.id,
-                f"❌ Maria gặp lỗi rồi anh ơi: `{e}`",
-                message_thread_id=message.message_thread_id,
-                parse_mode="Markdown"
-            )
-        except:
-            bot.send_message(message.chat.id, f"❌ Lỗi: {e}", message_thread_id=message.message_thread_id)
+        bot.send_message(message.chat.id, f"❌ Maria gặp lỗi rồi anh ơi: {e}", message_thread_id=message.message_thread_id)
 
 
 
